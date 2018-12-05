@@ -11,7 +11,6 @@
 #include <eosio/chain/block.hpp>
 #include <eosio/chain/plugin_interface.hpp>
 #include <eosio/producer_plugin/producer_plugin.hpp>
-#include <eosio/utilities/key_conversion.hpp>
 #include <eosio/chain/contract_types.hpp>
 
 #include <fc/network/message_buffer.hpp>
@@ -62,15 +61,6 @@ namespace eosio {
    using socket_ptr = std::shared_ptr<tcp::socket>;
 
    using net_message_ptr = shared_ptr<net_message>;
-
-   template<typename I>
-   std::string itoh(I n, size_t hlen = sizeof(I)<<1) {
-      static const char* digits = "0123456789abcdef";
-      std::string r(hlen, '0');
-      for(size_t i = 0, j = (hlen - 1) * 4 ; i < hlen; ++i, j -= 4)
-         r[i] = digits[(n>>j) & 0x0f];
-      return r;
-   }
 
    struct node_transaction_state {
       transaction_id_type id;
@@ -852,10 +842,22 @@ namespace eosio {
       }
       block_id_type head_id;
       block_id_type lib_id;
-      uint32_t lib_num;
+      block_id_type remote_head_id;
+      uint32_t remote_head_num = 0;
       try {
-         lib_num = cc.last_irreversible_block_num();
-         lib_id = cc.last_irreversible_block_id();
+         if (last_handshake_recv.generation >= 1) {
+            remote_head_id = last_handshake_recv.head_id;
+            remote_head_num = block_header::num_from_id(remote_head_id);
+            fc_dlog(logger, "maybe truncating branch at  = ${h}:${id}",("h",remote_head_num)("id",remote_head_id));
+         }
+
+         // base our branch off of the last handshake we sent the peer instead of our current
+         // LIB which could have moved forward in time as packets were in flight.
+         if (last_handshake_sent.generation >= 1) {
+            lib_id = last_handshake_sent.last_irreversible_block_id;
+         } else {
+            lib_id = cc.last_irreversible_block_id();
+         }
          head_id = cc.fork_db_head_block_id();
       }
       catch (const assert_exception &ex) {
@@ -872,6 +874,13 @@ namespace eosio {
       block_id_type null_id;
       for (auto bid = head_id; bid != null_id && bid != lib_id; ) {
          try {
+
+            // if the last handshake received indicates that we are catching up on a fork
+            // that the peer is already partially aware of, no need to resend blocks
+            if (remote_head_id == bid) {
+               break;
+            }
+
             signed_block_ptr b = cc.fetch_block_by_id(bid);
             if ( b ) {
                bid = b->previous;
@@ -886,7 +895,7 @@ namespace eosio {
       }
       size_t count = 0;
       if (!bstack.empty()) {
-         if (bstack.back()->previous == lib_id) {
+         if (bstack.back()->previous == lib_id || bstack.back()->previous == remote_head_id) {
             count = bstack.size();
             while (bstack.size()) {
                enqueue(*bstack.back());
@@ -1504,9 +1513,10 @@ namespace eosio {
       req.req_blocks.mode = catch_up;
       for (auto cc : my_impl->connections) {
          if (cc->fork_head == id ||
-             cc->fork_head_num > num)
+             cc->fork_head_num > num) {
             req.req_blocks.mode = none;
-         break;
+            break;
+         }
       }
       if( req.req_blocks.mode == catch_up ) {
          c->fork_head = id;
@@ -1537,7 +1547,7 @@ namespace eosio {
       else {
          c->last_handshake_recv.last_irreversible_block_num = msg.known_trx.pending;
          reset_lib_num (c);
-         start_sync(c, msg.known_blocks.pending);
+         start_sync(c, msg.known_trx.pending);
       }
    }
 
@@ -2369,7 +2379,7 @@ namespace eosio {
       request_message req;
       bool send_req = false;
       if (msg.known_trx.mode != none) {
-         fc_dlog(logger,"this is a ${m} notice with ${n} blocks", ("m",modes_str(msg.known_trx.mode))("n",msg.known_trx.pending));
+         fc_dlog(logger,"this is a ${m} notice with ${n} transactions", ("m",modes_str(msg.known_trx.mode))("n",msg.known_trx.pending));
       }
       switch (msg.known_trx.mode) {
       case none:
@@ -2403,9 +2413,6 @@ namespace eosio {
       }
       switch (msg.known_blocks.mode) {
       case none : {
-         if (msg.known_trx.mode != normal) {
-            return;
-         }
          break;
       }
       case last_irr_catch_up:
