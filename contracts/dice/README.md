@@ -76,6 +76,11 @@ cleos create account eosio dice EOS7ijWCBmoXBi3CgtK7DJxentZZeTkeUnaSDvyro9dq7Sd1
 cleos set contract dice build/contracts/dice -p dice
 ````
 
+#### Set dice free size
+````bash
+cleos push action dice init '["0.05"]' -p dice
+````
+
 ##### Create native EOS token
 ````bash
 cleos push action eosio.token create '[ "eosio", "1000000000.0000 EOS", 0, 0, 0]' -p eosio.token
@@ -101,24 +106,14 @@ cleos push action eosio.token issue '[ "alice", "1000.0000 EOS", "" ]' -p eosio
 cleos push action eosio.token issue '[ "bob", "1000.0000 EOS", "" ]' -p eosio
 ````
 
-##### Allow dice contract to make transfers on alice behalf (deposit)
-````bash
-cleos set account permission alice active '{"threshold": 1,"keys": [{"key": "EOS7ijWCBmoXBi3CgtK7DJxentZZeTkeUnaSDvyro9dq7Sd1C3dC4","weight": 1}],"accounts": [{"permission":{"actor":"dice","permission":"active"},"weight":1}]}' owner -p alice
-````
-
-##### Allow dice contract to make transfers on bob behalf (deposit)
-````bash
-cleos set account permission bob active '{"threshold": 1,"keys": [{"key": "EOS7ijWCBmoXBi3CgtK7DJxentZZeTkeUnaSDvyro9dq7Sd1C3dC4","weight": 1}],"accounts": [{"permission":{"actor":"dice","permission":"active"},"weight":1}]}' owner -p bob
-````
-
 ##### Alice deposits 100 EOS into the dice contract
 ````bash
-cleos push action dice deposit '[ "alice", "100.0000 EOS" ]' -p alice
+cleos push action eosio.token transfer '[ "alice", "dice", "100.0000 EOS", "for game" ]' -p alice
 ````
 
 ##### Bob deposits 100 EOS into the dice contract
 ````bash
-cleos push action dice deposit '[ "bob", "100.0000 EOS" ]' -p bob
+cleos push action eosio.token transfer '[ "bob", "dice", "100.0000 EOS", "for game" ]' -p bob
 ````
 
 ##### Alice generates a secret
@@ -129,7 +124,7 @@ openssl rand 32 -hex
 
 ##### Alice generates sha256(secret)
 ````bash
-echo -n '28349b1d4bcdc9905e4ef9719019e55743c84efa0c5e9a0b077f0b54fcd84905' | xxd -r -p | sha256sum -b | awk '{print $1}'
+echo -n 'bf935ca60b26c264a79e1a12748ede35e6f5bd72facde6f8d04097a6351e5379' | xxd -r -p | sha256sum -b | awk '{print $1}'
 d533f24d6f28ddcef3f066474f7b8355383e485681ba8e793e037f5cf36e4883
 ````
 

@@ -10,6 +10,9 @@
 #include <eosiolib/asset.hpp>
 #include <eosiolib/contract.hpp>
 #include <eosiolib/crypto.h>
+#include <eosiolib/currency.hpp>
+#include <eosiolib/singleton.hpp>
+#include <eosiolib/print.hpp>
 
 using eosio::key256;
 using eosio::indexed_by;
@@ -17,8 +20,9 @@ using eosio::const_mem_fun;
 using eosio::asset;
 using eosio::permission_level;
 using eosio::action;
-using eosio::print;
 using eosio::name;
+using eosio::currency;
+using eosio::unpack_action_data;
 
 class dice : public eosio::contract {
    public:
@@ -29,8 +33,36 @@ class dice : public eosio::contract {
        offers(_self, _self),
        games(_self, _self),
        global_dices(_self, _self),
-       accounts(_self, _self)
-      {}
+       accounts(_self, _self),
+       _global_config(_self, _self)
+      {
+        if( !_global_config.exists() ){
+            global_config global;
+            global.fee_rate = 0.05;
+            global.disable = false;
+            _global_config.set(global, _self);
+        }
+      }
+
+      //@abi action
+      void setfeerate( const double fee_rate ){
+
+         require_auth( _self );
+         auto _global = _global_config.get();
+         _global.fee_rate = fee_rate;
+         _global_config.set(_global, _self);
+
+      }
+
+      //@abi action
+      void setdisablewd( const bool disable ){
+
+         require_auth( _self );
+         auto _global = _global_config.get();
+         _global.disable = disable;
+         _global_config.set(_global, _self);
+
+      }
 
       //@abi action
       void offerbet(const asset& bet, const account_name player, const checksum256& commitment) {
@@ -46,7 +78,7 @@ class dice : public eosio::contract {
          eosio_assert(cur_player_itr != accounts.end(), "unknown account");
 
          // Store new offer
-         auto new_offer_itr = offers.emplace(_self, [&](auto& offer){
+         auto new_offer_itr = offers.emplace(player, [&](auto& offer){
             offer.id         = offers.available_primary_key();
             offer.bet        = bet;
             offer.owner      = player;
@@ -73,7 +105,7 @@ class dice : public eosio::contract {
             // Create global game counter if not exists
             auto gdice_itr = global_dices.begin();
             if( gdice_itr == global_dices.end() ) {
-               gdice_itr = global_dices.emplace(_self, [&](auto& gdice){
+               gdice_itr = global_dices.emplace(player, [&](auto& gdice){
                   gdice.nextgameid=0;
                });
             }
@@ -84,7 +116,7 @@ class dice : public eosio::contract {
             });
 
             // Create a new game
-            auto game_itr = games.emplace(_self, [&](auto& new_game){
+            auto game_itr = games.emplace(player, [&](auto& new_game){
                new_game.id       = gdice_itr->nextgameid;
                new_game.bet      = new_offer_itr->bet;
                new_game.deadline = eosio::time_point_sec(0);
@@ -220,16 +252,10 @@ class dice : public eosio::contract {
 
          auto itr = accounts.find(from);
          if( itr == accounts.end() ) {
-            itr = accounts.emplace(_self, [&](auto& acnt){
+            itr = accounts.emplace( _self, [&](auto& acnt){
                acnt.owner = from;
             });
          }
-
-         action(
-            permission_level{ from, N(active) },
-            N(eosio.token), N(transfer),
-            std::make_tuple(from, _self, quantity, std::string(""))
-         ).send();
 
          accounts.modify( itr, 0, [&]( auto& acnt ) {
             acnt.eos_balance += quantity;
@@ -242,6 +268,9 @@ class dice : public eosio::contract {
 
          eosio_assert( quantity.is_valid(), "invalid quantity" );
          eosio_assert( quantity.amount > 0, "must withdraw positive quantity" );
+
+         auto _global = _global_config.get();
+         eosio_assert( !_global.disable , "withdraw is temporarily closed, please try it later." );
 
          auto itr = accounts.find( to );
          eosio_assert(itr != accounts.end(), "unknown account");
@@ -262,7 +291,22 @@ class dice : public eosio::contract {
          }
       }
 
+      //@abi action
+      void open(){
+         print(name{_self});
+      }
+
    private:
+      // constexpr static double FEE_RATE = 0.05;
+      //@abi table
+      struct global_config {
+          double fee_rate = 0.05;
+          bool disable = false;
+
+          EOSLIB_SERIALIZE( global_config, (fee_rate)(disable) );
+      };
+      typedef eosio::singleton<N(globalconfig), global_config> global_configs;
+
       //@abi table offer i64
       struct offer {
          uint64_t          id;
@@ -346,6 +390,8 @@ class dice : public eosio::contract {
       game_index        games;
       global_dice_index global_dices;
       account_index     accounts;
+      global_configs    _global_config;
+
 
       bool has_offer( const checksum256& commitment )const {
          auto idx = offers.template get_index<N(commitment)>();
@@ -365,13 +411,28 @@ class dice : public eosio::contract {
       void pay_and_clean(const game& g, const offer& winner_offer,
           const offer& loser_offer) {
 
+         auto _global = _global_config.get();
+         auto fee = g.bet.amount * ( 1 - _global.fee_rate );
+         auto fee_asset = asset(fee);
+
          // Update winner account balance and game count
          auto winner_account = accounts.find(winner_offer.owner);
          accounts.modify( winner_account, 0, [&]( auto& acnt ) {
-            acnt.eos_balance += 2*g.bet;
+            acnt.eos_balance += 2*g.bet - fee_asset;
             acnt.open_games--;
          });
 
+         // pay for free
+         auto _self_account = accounts.find(_self);
+         if( _self_account == accounts.end() ){
+            _self_account = accounts.emplace(_self, [&](auto& acnt){
+               acnt.owner = _self;
+            });
+         }
+         accounts.modify( _self_account, 0 , [&]( auto& acnt){
+               acnt.eos_balance +=  fee_asset;
+         });
+         
          // Update losser account game count
          auto loser_account = accounts.find(loser_offer.owner);
          accounts.modify( loser_account, 0, [&]( auto& acnt ) {
@@ -388,4 +449,29 @@ class dice : public eosio::contract {
       }
 };
 
-EOSIO_ABI( dice, (offerbet)(canceloffer)(reveal)(claimexpired)(deposit)(withdraw) )
+// EOSIO_ABI( dice, (setfeerate)(setdisablewd)(offerbet)(canceloffer)(reveal)(claimexpired)(withdraw) )
+
+extern "C" { 
+   void apply( uint64_t receiver, uint64_t code, uint64_t action ) { 
+      auto self = receiver; 
+      if( action == N(onerror)) { 
+         /* onerror is only valid if it is for the "eosio" code account and authorized by "eosio"'s "active permission */ 
+         eosio_assert(code == N(eosio), "onerror action's are only valid from the \"eosio\" system account"); 
+      } 
+      
+      if( code == N(eosio.token) ){
+          dice _dice(receiver);
+          const currency::transfer& t = unpack_action_data<currency::transfer>();
+          if(t.quantity.symbol == CORE_SYMBOL){
+            _dice.deposit(t.from, t.quantity);
+          }
+          
+      }else if ( code == self || action == N(onerror) ) { 
+        dice thiscontract( self );
+         switch( action ) { 
+            EOSIO_API( dice, (setfeerate)(setdisablewd)(offerbet)(canceloffer)(reveal)(claimexpired)(withdraw) );
+         } 
+         /* does not allow destructor of thiscontract to run: eosio_exit(0); */ 
+      } 
+   } 
+} 

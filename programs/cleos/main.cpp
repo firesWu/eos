@@ -518,6 +518,18 @@ chain::action create_newaccount(const name& creator, const name& newaccount, pub
    };
 }
 
+chain::action create_newaccount(const name& creator, const name& newaccount, eosio::chain::authority owner, eosio::chain::authority active) {
+   return action {
+      tx_permission.empty() ? vector<chain::permission_level>{{creator,config::active_name}} : get_account_permissions(tx_permission),
+      eosio::chain::newaccount{
+         .creator      = creator,
+         .name         = newaccount,
+         .owner        = owner,
+         .active       = active
+      }
+   };
+}
+
 chain::action create_action(const vector<permission_level>& authorization, const account_name& code, const action_name& act, const fc::variant& args) {
    return chain::action{authorization, code, act, variant_to_bin(code, act, args)};
 }
@@ -897,6 +909,7 @@ struct create_account_subcommand {
    string stake_cpu;
    uint32_t buy_ram_bytes_in_kbytes = 0;
    string buy_ram_eos;
+   bool auth;
    bool transfer;
    bool simple;
 
@@ -906,6 +919,7 @@ struct create_account_subcommand {
       createAccount->add_option("name", account_name, localized("The name of the new account"))->required();
       createAccount->add_option("OwnerKey", owner_key_str, localized("The owner public key for the new account"))->required();
       createAccount->add_option("ActiveKey", active_key_str, localized("The active public key for the new account"));
+      createAccount->add_flag("--auth", auth, localized("The active public key for the new account"));
 
       if (!simple) {
          createAccount->add_option("--stake-net", stake_net,
@@ -925,14 +939,23 @@ struct create_account_subcommand {
       createAccount->set_callback([this] {
             if( !active_key_str.size() )
                active_key_str = owner_key_str;
-            public_key_type owner_key, active_key;
-            try {
-               owner_key = public_key_type(owner_key_str);
-            } EOS_RETHROW_EXCEPTIONS(public_key_type_exception, "Invalid owner public key: ${public_key}", ("public_key", owner_key_str));
-            try {
-               active_key = public_key_type(active_key_str);
-            } EOS_RETHROW_EXCEPTIONS(public_key_type_exception, "Invalid active public key: ${public_key}", ("public_key", active_key_str));
-            auto create = create_newaccount(creator, account_name, owner_key, active_key);
+            action create;
+            if(auth){
+                eosio::chain::authority owner_key, active_key;
+                owner_key = parse_json_authority_or_key(owner_key_str);
+                active_key = parse_json_authority_or_key(active_key_str);
+                create = create_newaccount(creator, account_name, owner_key, active_key);
+            }else{
+                public_key_type owner_key, active_key;
+                try {
+                owner_key = public_key_type(owner_key_str);
+                } EOS_RETHROW_EXCEPTIONS(public_key_type_exception, "Invalid owner public key: ${public_key}", ("public_key", owner_key_str));
+                try {
+                active_key = public_key_type(active_key_str);
+                } EOS_RETHROW_EXCEPTIONS(public_key_type_exception, "Invalid active public key: ${public_key}", ("public_key", active_key_str));
+                create = create_newaccount(creator, account_name, owner_key, active_key);
+            }
+
             if (!simple) {
                if ( buy_ram_eos.empty() && buy_ram_bytes_in_kbytes == 0) {
                   std::cerr << "ERROR: Either --buy-ram or --buy-ram-kbytes with non-zero value is required" << std::endl;
@@ -2759,6 +2782,7 @@ int main( int argc, char** argv ) {
    string proposed_transaction;
    string proposed_contract;
    string proposed_action;
+
    string proposer;
    unsigned int proposal_expiration_hours = 24;
    CLI::callback_t parse_expiration_hours = [&](CLI::results_t res) -> bool {
@@ -2779,6 +2803,7 @@ int main( int argc, char** argv ) {
    propose_action->add_option("contract", proposed_contract, localized("contract to which deferred transaction should be delivered"))->required();
    propose_action->add_option("action", proposed_action, localized("action of deferred transaction"))->required();
    propose_action->add_option("data", proposed_transaction, localized("The JSON string or filename defining the action to propose"))->required();
+
    propose_action->add_option("proposer", proposer, localized("Account proposing the transaction"));
    propose_action->add_option("proposal_expiration", parse_expiration_hours, localized("Proposal expiration interval in hours"));
 
@@ -2787,7 +2812,7 @@ int main( int argc, char** argv ) {
       try {
          requested_perm_var = json_from_file_or_string(requested_perm);
       } EOS_RETHROW_EXCEPTIONS(transaction_type_exception, "Fail to parse permissions JSON '${data}'", ("data",requested_perm))
-      fc::variant transaction_perm_var;
+      fc::variant transaction_perm_var,transaction_perm_var1;
       try {
          transaction_perm_var = json_from_file_or_string(transaction_perm);
       } EOS_RETHROW_EXCEPTIONS(transaction_type_exception, "Fail to parse permissions JSON '${data}'", ("data",transaction_perm))
@@ -2828,7 +2853,7 @@ int main( int argc, char** argv ) {
       trx.max_net_usage_words = 0;
       trx.max_cpu_usage_ms = 0;
       trx.delay_sec = 0;
-      trx.actions = { chain::action(trxperm, name(proposed_contract), name(proposed_action), proposed_trx_serialized) };
+      trx.actions = { chain::action(trxperm, name(proposed_contract), name(proposed_action), proposed_trx_serialized)};
 
       fc::to_variant(trx, trx_var);
 
@@ -3072,6 +3097,39 @@ int main( int argc, char** argv ) {
    auto unregProxy = unregproxy_subcommand(system);
 
    auto cancelDelay = canceldelay_subcommand(system);
+
+    // multisig exec
+  string pkstr;
+  fc::crypto::private_key pk;
+  string sa;
+  fc::sha256 sha;
+  auto sn = app.add_subcommand("signature", localized("Execute proposed transaction"));
+  sn->require_subcommand();
+  add_standard_transaction_options(sn);
+
+  auto signpk = sn->add_subcommand("signpk", localized("Execute proposed transaction"));
+  signpk->add_option("pk", pkstr, localized("proposer name (string)"))->required();
+  signpk->add_option("sha256", sa, localized("proposal name (string)"))->required();
+
+  signpk->set_callback([&] {
+    pk = private_key_type(pkstr);
+    sha = fc::sha256(sa);
+    auto vc = pk.sign(sha);
+    std::cout<<std::string(vc)<<endl;
+  });
+
+  string sig;
+  auto unsignpk = sn->add_subcommand("unsignpk", localized("Execute proposed transaction"));
+  unsignpk->add_option("sig", sig, localized("proposer name (string)"))->required();
+  unsignpk->add_option("sha256", sa, localized("proposal name (string)"))->required();
+
+  unsignpk->set_callback([&] {
+    auto _signature = fc::crypto::signature(sig);
+    sha = fc::sha256(sa);
+    std::cout<< fc::crypto::public_key(_signature, sha, false) <<endl;
+  });
+
+
 
    try {
        app.parse(argc, argv);

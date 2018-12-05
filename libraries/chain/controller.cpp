@@ -689,6 +689,7 @@ struct controller_impl {
 
       // Only subjective OR soft OR hard failure logic below:
 
+      ilog("error ${err}",("err",*trace->except));
       if( gtrx.sender != account_name() && !failure_is_subjective(*trace->except)) {
          // Attempt error handling for the generated transaction.
          dlog("${detail}", ("detail", trace->except->to_detail_string()));
