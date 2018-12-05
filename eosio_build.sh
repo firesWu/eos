@@ -48,10 +48,9 @@
    DISK_MIN=20
    DOXYGEN=false
    ENABLE_COVERAGE_TESTING=false
-<<<<<<< HEAD
+
    CORE_SYMBOL_NAME="EOS"
-=======
-   CORE_SYMBOL_NAME="SYS"
+
    # Use current directory's tmp directory if noexec is enabled for /tmp
    if (mount | grep "/tmp " | grep --quiet noexec); then
         mkdir -p $SOURCE_DIR/tmp
@@ -60,7 +59,7 @@
    else # noexec wasn't found
         TEMP_DIR="/tmp"
    fi
->>>>>>> v1.5.0
+
    START_MAKE=true
    TIME_BEGIN=$( date -u +%s )
    VERSION=1.2
